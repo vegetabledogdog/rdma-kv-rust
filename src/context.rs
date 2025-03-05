@@ -322,7 +322,6 @@ impl RdmaContext {
         }
     }
 
-    #[allow(dead_code)]
     pub fn post_receive(&mut self) -> Result<(), io::Error> {
         let mut sge = unsafe { std::mem::zeroed::<ibv_sge>() };
         sge.addr = self.buf.as_mut_ptr() as _;
@@ -372,7 +371,6 @@ impl RdmaContext {
     }
 
     pub fn set_bytes_to_buf(&mut self, new_bytes: &mut Vec<u8>) {
-        debug!("buf addr: {:p}", self.buf.as_ptr());
         new_bytes.resize(BUFFER_SIZE, 0);
         self.buf.copy_from_slice(new_bytes);
         debug!("buf addr: {:p}", self.buf.as_ptr());
@@ -408,6 +406,8 @@ impl RdmaContext {
                     let value = self.kv_store.as_ref().unwrap().get(&key);
                     let mut send_str = serde_json::to_vec(&value.unwrap_or(&"key not found".to_string())).unwrap();
                     self.set_bytes_to_buf(&mut send_str);
+                    self.post_send(ibv_wr_opcode::IBV_WR_SEND).unwrap();
+                    self.poll_completion().unwrap();
                 }
                 KeyValueOpt::Delete { key } => {
                     self.kv_store.as_mut().unwrap().remove(&key);

@@ -1,4 +1,3 @@
-use std::{thread::sleep, time::Duration};
 
 use clap::Parser;
 mod cli;
@@ -21,6 +20,10 @@ fn main() {
     if config.server.is_some() {
         loop {
             if let Ok(kv_opt) = cli::client_opt() {
+                if let KeyValueOpt::Get { key: _ } = kv_opt {
+                    rdma_context.post_receive().unwrap();
+                }
+
                 let mut send_str = serde_json::to_vec(&kv_opt).unwrap();
                 rdma_context.set_bytes_to_buf(&mut send_str);
                 rdma_context
@@ -28,11 +31,7 @@ fn main() {
                     .unwrap();
                 rdma_context.poll_completion().unwrap();
 
-                sleep(Duration::from_secs(1));
                 if let KeyValueOpt::Get { key: _ } = kv_opt {
-                    rdma_context
-                        .post_send(ibv_wr_opcode::IBV_WR_RDMA_READ)
-                        .unwrap();
                     rdma_context.poll_completion().unwrap();
                     let value = rdma_context.read_the_buf();
                     tracing::info!("get value: {}", value);
