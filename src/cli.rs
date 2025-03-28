@@ -18,6 +18,9 @@ pub struct RdmaOpt {
     /// use port <port> of IB device (default 1)
     #[clap(short = 'i', long, default_value_t = 1)]
     pub ib_port: u8,
+    /// client number
+    #[clap(short = 'n', long, default_value_t = 1)]
+    pub client_num: usize,
 }
 
 #[derive(Debug, Parser, Serialize, Deserialize)]

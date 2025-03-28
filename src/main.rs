@@ -1,4 +1,3 @@
-
 use clap::Parser;
 mod cli;
 mod context;
@@ -18,22 +17,23 @@ fn main() {
     rdma_context.connect_qp(&config).unwrap();
 
     if config.server.is_some() {
+        // client
         loop {
             if let Ok(kv_opt) = cli::client_opt() {
                 if let KeyValueOpt::Get { key: _ } = kv_opt {
-                    rdma_context.post_receive().unwrap();
+                    rdma_context.post_receive(0).unwrap();
                 }
 
                 let mut send_str = serde_json::to_vec(&kv_opt).unwrap();
-                rdma_context.set_bytes_to_buf(&mut send_str);
+                rdma_context.set_bytes_to_buf(&mut send_str, 0);
                 rdma_context
-                    .post_send(ibv_wr_opcode::IBV_WR_RDMA_WRITE)
+                    .post_send(ibv_wr_opcode::IBV_WR_RDMA_WRITE, 0)
                     .unwrap();
                 rdma_context.poll_completion().unwrap();
 
                 if let KeyValueOpt::Get { key: _ } = kv_opt {
                     rdma_context.poll_completion().unwrap();
-                    let value = rdma_context.read_the_buf();
+                    let value = rdma_context.read_the_buf(0);
                     tracing::info!("get value: {}", value);
                 }
             }

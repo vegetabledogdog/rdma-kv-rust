@@ -15,7 +15,7 @@ const BUFFER_SIZE: usize = 100; //1MB
 
 // connection manager data
 // structure to exchange data which is needed to connect the QPs
-#[derive(Default, Debug, Serialize, Deserialize)]
+#[derive(Default, Debug, Serialize, Deserialize, Clone)]
 struct CmConData {
     addr: u64,   /* Buffer address */
     rkey: u32,   /* Remote key */
@@ -24,17 +24,21 @@ struct CmConData {
     gid: Gid,    /* gid */
 }
 
+#[derive(Clone)]
 pub struct RdmaContext {
     port_attr: ibv_port_attr,
     remote_props: CmConData,
     ib_ctx: *mut ibv_context,
     pd: *mut ibv_pd,
     cq: *mut ibv_cq,
-    qp: *mut ibv_qp,
-    mr: *mut ibv_mr,
-    buf: Vec<u8>,
+    qps: Vec<*mut ibv_qp>,
+    mrs: Vec<*mut ibv_mr>,
+    bufs: Vec<Vec<u8>>,
     kv_store: Option<HashMap<String, String>>,
 }
+
+unsafe impl Send for RdmaContext {}
+unsafe impl Sync for RdmaContext {}
 
 impl RdmaContext {
     pub fn create(config: &RdmaOpt) -> io::Result<Self> {
@@ -88,48 +92,62 @@ impl RdmaContext {
             )
         };
         assert!(!cq.is_null());
-        // create buffer
-        let mut buf = vec![0; BUFFER_SIZE];
-        debug!("Local Buffer addr: {:p}", buf.as_ptr());
-        // register the memory buffer
-        let mr_access_flags = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
-            | ibv_access_flags::IBV_ACCESS_REMOTE_READ
-            | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE;
-        let mr = unsafe {
-            ibv_reg_mr(
-                pd,
-                buf.as_mut_ptr() as *mut _,
-                BUFFER_SIZE,
-                mr_access_flags.0 as i32,
-            )
+        let client_num = if config.server.is_some() {
+            1
+        } else {
+            config.client_num
         };
-        debug!("MR registered with addr={:p}", buf.as_mut_ptr());
-        // create qp
-        let mut qp_init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
-        qp_init_attr.qp_type = ibv_qp_type::IBV_QPT_RC;
-        qp_init_attr.sq_sig_all = 1;
-        qp_init_attr.send_cq = cq;
-        qp_init_attr.recv_cq = cq;
-        qp_init_attr.cap.max_send_wr = 1;
-        qp_init_attr.cap.max_recv_wr = 1;
-        qp_init_attr.cap.max_send_sge = 1;
-        qp_init_attr.cap.max_recv_sge = 1;
-        let qp = unsafe { ibv_create_qp(pd, &mut qp_init_attr) };
-        debug!("QP was created, QP number={:#0X}", unsafe { (*qp).qp_num });
+        let mut qps: Vec<*mut ibv_qp> = Vec::new();
+        let mut bufs: Vec<Vec<u8>> = Vec::new();
+        let mut mrs: Vec<*mut ibv_mr> = Vec::new();
+        for _ in 0..client_num {
+            // create buffer
+            let mut buf = vec![0; BUFFER_SIZE];
+            debug!("Local Buffer addr: {:p}", buf.as_ptr());
+            // register the memory buffer
+            let mr_access_flags = ibv_access_flags::IBV_ACCESS_LOCAL_WRITE
+                | ibv_access_flags::IBV_ACCESS_REMOTE_READ
+                | ibv_access_flags::IBV_ACCESS_REMOTE_WRITE;
+            let mr = unsafe {
+                ibv_reg_mr(
+                    pd,
+                    buf.as_mut_ptr() as *mut _,
+                    BUFFER_SIZE,
+                    mr_access_flags.0 as i32,
+                )
+            };
+            debug!("MR registered with addr={:p}", buf.as_mut_ptr());
+            bufs.push(buf);
+            mrs.push(mr);
+            // create qp
+            let mut qp_init_attr = unsafe { std::mem::zeroed::<ibv_qp_init_attr>() };
+            qp_init_attr.qp_type = ibv_qp_type::IBV_QPT_RC;
+            qp_init_attr.sq_sig_all = 1;
+            qp_init_attr.send_cq = cq;
+            qp_init_attr.recv_cq = cq;
+            qp_init_attr.cap.max_send_wr = 1;
+            qp_init_attr.cap.max_recv_wr = 1;
+            qp_init_attr.cap.max_send_sge = 1;
+            qp_init_attr.cap.max_recv_sge = 1;
+            let qp = unsafe { ibv_create_qp(pd, &mut qp_init_attr) };
+            debug!("QP was created, QP number={:#0X}", unsafe { (*qp).qp_num });
+            qps.push(qp);
+        }
         let kv_store: Option<HashMap<String, String>> = if config.server.is_none() {
             Some(HashMap::new())
         } else {
             None
         };
+
         Ok(RdmaContext {
             port_attr,
             remote_props: Default::default(), // it will set in connect_qp
             ib_ctx,
             pd,
             cq,
-            qp,
-            mr,
-            buf,
+            qps,
+            mrs,
+            bufs,
             kv_store,
         })
     }
@@ -141,60 +159,67 @@ impl RdmaContext {
         if config.gidx >= 0 {
             unsafe { ibv_query_gid(self.ib_ctx, config.ib_port, config.gidx, local_gid.ffi()) };
         }
-        let local_con_data = CmConData {
-            addr: self.buf.as_ptr() as _,         // buffer address
-            rkey: unsafe { (*self.mr).rkey },     // remote key
-            qp_num: unsafe { (*self.qp).qp_num }, // QP number
-            lid: self.port_attr.lid,              // local id
-            gid: local_gid,                       // local gid
-        };
-        debug!("Local Conn  {:#0X}", local_con_data.addr);
-        let local_con_data_encoded = bincode::serialize(&local_con_data).unwrap();
-        let mut temp_con_data_encoded = bincode::serialize(&CmConData::default()).unwrap();
-        // if it is server
-        if config.server.is_none() {
-            let server_socket =
-                SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), config.tcp_port as _);
-            let listener = TcpListener::bind(server_socket).unwrap();
-            info!("Waiting for client to exchange the conn data");
-            for stream in listener.incoming() {
-                match stream {
-                    Ok(mut stream) => {
-                        stream.write_all(&local_con_data_encoded).unwrap();
-                        stream.read_exact(&mut temp_con_data_encoded).unwrap();
-                        break;
-                    }
-                    Err(_) => {
-                        error!("Error in connect qp")
+        tracing::info!("qp num: {:?}", self.qps.len());
+        for i in 0..self.qps.len() {
+            let local_con_data = CmConData {
+                addr: self.bufs[i].as_ptr() as _,         // buffer address
+                rkey: unsafe { (*self.mrs[i]).rkey },     // remote key
+                qp_num: unsafe { (*self.qps[i]).qp_num }, // QP number
+                lid: self.port_attr.lid,                  // local id
+                gid: local_gid,                           // local gid
+            };
+            debug!("Local Conn  {:#0X}", local_con_data.addr);
+            let local_con_data_encoded = bincode::serialize(&local_con_data).unwrap();
+            let mut temp_con_data_encoded = bincode::serialize(&CmConData::default()).unwrap();
+            // if it is server
+            if config.server.is_none() {
+                let server_socket = SocketAddr::new(
+                    IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)),
+                    config.tcp_port as u16,
+                );
+                let listener = TcpListener::bind(server_socket).unwrap();
+                info!("Waiting for client to exchange the conn data");
+                for stream in listener.incoming() {
+                    match stream {
+                        Ok(mut stream) => {
+                            stream.write_all(&local_con_data_encoded).unwrap();
+                            stream.read_exact(&mut temp_con_data_encoded).unwrap();
+                            break;
+                        }
+                        Err(_) => {
+                            error!("Error in connect qp")
+                        }
                     }
                 }
+            } else {
+                // if it is client
+                let client_socket = SocketAddr::new(
+                    IpAddr::from_str(config.server.as_ref().unwrap()).unwrap(),
+                    config.tcp_port as u16,
+                );
+                tracing::info!("Connecting to server at: {:?}", client_socket);
+                let mut stream = TcpStream::connect(client_socket).unwrap();
+                stream.write_all(&local_con_data_encoded).unwrap();
+                stream.read_exact(&mut temp_con_data_encoded).unwrap();
             }
-        } else {
-            // if it is client
-            let client_socket = SocketAddr::new(
-                IpAddr::from_str(config.server.as_ref().unwrap()).unwrap(),
-                config.tcp_port as _,
-            );
-            let mut stream = TcpStream::connect(client_socket).unwrap();
-            stream.write_all(&local_con_data_encoded).unwrap();
-            stream.read_exact(&mut temp_con_data_encoded).unwrap();
+            self.remote_props = bincode::deserialize(&temp_con_data_encoded).unwrap();
+            debug!("Remote Conn addr: {:#0X}", self.remote_props.addr);
+
+            self.modify_qp_to_init(config.ib_port, i)?;
+
+            self.modify_qp_to_rtr(
+                config,
+                self.remote_props.qp_num,
+                self.remote_props.lid,
+                self.remote_props.gid,
+                i,
+            )?;
+            self.modify_qp_to_rts(i)?;
         }
-        self.remote_props = bincode::deserialize(&temp_con_data_encoded).unwrap();
-        debug!("Remote Conn addr: {:#0X}", self.remote_props.addr);
-
-        self.modify_qp_to_init(config.ib_port)?;
-
-        self.modify_qp_to_rtr(
-            config,
-            self.remote_props.qp_num,
-            self.remote_props.lid,
-            self.remote_props.gid,
-        )?;
-        self.modify_qp_to_rts()?;
         Ok(())
     }
 
-    pub fn modify_qp_to_init(&self, ib_port: u8) -> Result<(), io::Error> {
+    pub fn modify_qp_to_init(&self, ib_port: u8, i: usize) -> Result<(), io::Error> {
         let mut qp_attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
         qp_attr.qp_state = ibv_qp_state::IBV_QPS_INIT;
         qp_attr.port_num = ib_port;
@@ -208,7 +233,7 @@ impl RdmaContext {
             | ibv_qp_attr_mask::IBV_QP_PORT
             | ibv_qp_attr_mask::IBV_QP_ACCESS_FLAGS;
         let err =
-            unsafe { ibv_modify_qp(self.qp, &mut qp_attr, (attr_mask.0).try_into().unwrap()) };
+            unsafe { ibv_modify_qp(self.qps[i], &mut qp_attr, (attr_mask.0).try_into().unwrap()) };
         if err == 0 {
             debug!("INIT QP done");
             Ok(())
@@ -224,6 +249,7 @@ impl RdmaContext {
         remote_qpn: u32,
         dlid: u16,
         dgid: Gid,
+        i: usize,
     ) -> Result<(), io::Error> {
         let mut qp_attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
         qp_attr.qp_state = ibv_qp_state::IBV_QPS_RTR;
@@ -254,7 +280,7 @@ impl RdmaContext {
             | ibv_qp_attr_mask::IBV_QP_MAX_DEST_RD_ATOMIC
             | ibv_qp_attr_mask::IBV_QP_MIN_RNR_TIMER;
 
-        let err = unsafe { ibv_modify_qp(self.qp, &mut qp_attr, (attr_mask.0) as _) };
+        let err = unsafe { ibv_modify_qp(self.qps[i], &mut qp_attr, (attr_mask.0) as _) };
         if err == 0 {
             debug!("Modify QP to RTR state!");
             Ok(())
@@ -263,7 +289,7 @@ impl RdmaContext {
         }
     }
 
-    pub fn modify_qp_to_rts(&self) -> Result<(), io::Error> {
+    pub fn modify_qp_to_rts(&self, i: usize) -> Result<(), io::Error> {
         let mut qp_attr = unsafe { std::mem::zeroed::<ibv_qp_attr>() };
 
         qp_attr.qp_state = ibv_qp_state::IBV_QPS_RTS;
@@ -279,7 +305,7 @@ impl RdmaContext {
             | ibv_qp_attr_mask::IBV_QP_SQ_PSN
             | ibv_qp_attr_mask::IBV_QP_MAX_QP_RD_ATOMIC;
 
-        let err = unsafe { ibv_modify_qp(self.qp, &mut qp_attr, (attr_mask.0) as _) };
+        let err = unsafe { ibv_modify_qp(self.qps[i], &mut qp_attr, (attr_mask.0) as _) };
         if err == 0 {
             debug!("Modify QP to RTS state!");
             Ok(())
@@ -289,11 +315,11 @@ impl RdmaContext {
     }
 
     // create and send a work request
-    pub fn post_send(&mut self, opcode: ibv_wr_opcode::Type) -> Result<(), io::Error> {
+    pub fn post_send(&mut self, opcode: ibv_wr_opcode::Type, i: usize) -> Result<(), io::Error> {
         let mut sge = unsafe { std::mem::zeroed::<ibv_sge>() };
-        sge.addr = self.buf.as_mut_ptr() as _;
+        sge.addr = self.bufs[i].as_mut_ptr() as _;
         sge.length = BUFFER_SIZE as _;
-        sge.lkey = unsafe { (*self.mr).lkey };
+        sge.lkey = unsafe { (*self.mrs[i]).lkey };
 
         let mut send_wr = unsafe { std::mem::zeroed::<ibv_send_wr>() };
         send_wr.next = std::ptr::null_mut();
@@ -308,7 +334,7 @@ impl RdmaContext {
             send_wr.wr.rdma.rkey = self.remote_props.rkey;
         }
         let mut bad_wr: *mut ibv_send_wr = std::ptr::null_mut();
-        let err = unsafe { ibv_post_send(self.qp, &mut send_wr, &mut bad_wr) };
+        let err = unsafe { ibv_post_send(self.qps[i], &mut send_wr, &mut bad_wr) };
         if err == 0 {
             match opcode {
                 ibv_wr_opcode::IBV_WR_SEND => debug!("Send request was posted"),
@@ -322,11 +348,11 @@ impl RdmaContext {
         }
     }
 
-    pub fn post_receive(&mut self) -> Result<(), io::Error> {
+    pub fn post_receive(&mut self, i: usize) -> Result<(), io::Error> {
         let mut sge = unsafe { std::mem::zeroed::<ibv_sge>() };
-        sge.addr = self.buf.as_mut_ptr() as _;
+        sge.addr = self.bufs[i].as_mut_ptr() as _;
         sge.length = BUFFER_SIZE as _;
-        sge.lkey = unsafe { (*self.mr).lkey };
+        sge.lkey = unsafe { (*self.mrs[i]).lkey };
 
         let mut recv_wr = unsafe { std::mem::zeroed::<ibv_recv_wr>() };
         recv_wr.next = std::ptr::null_mut();
@@ -335,7 +361,7 @@ impl RdmaContext {
         recv_wr.num_sge = 1;
 
         let mut bad_wr: *mut ibv_recv_wr = std::ptr::null_mut();
-        let err = unsafe { ibv_post_recv(self.qp, &mut recv_wr, &mut bad_wr) };
+        let err = unsafe { ibv_post_recv(self.qps[i], &mut recv_wr, &mut bad_wr) };
         if err == 0 {
             debug!("Receive request was posted");
             Ok(())
@@ -370,66 +396,82 @@ impl RdmaContext {
         }
     }
 
-    pub fn set_bytes_to_buf(&mut self, new_bytes: &mut Vec<u8>) {
+    pub fn set_bytes_to_buf(&mut self, new_bytes: &mut Vec<u8>, i: usize) {
         new_bytes.resize(BUFFER_SIZE, 0);
-        self.buf.copy_from_slice(new_bytes);
-        debug!("buf addr: {:p}", self.buf.as_ptr());
+        self.bufs[i].copy_from_slice(new_bytes);
+        debug!("buf addr: {:p}", self.bufs[i].as_ptr());
     }
 
-    pub fn check_the_buf(&self) {
+    pub fn check_the_buf(&self, i: usize) {
         info!(
             "current buf in RDMA context is: {:#?}",
-            std::str::from_utf8(&self.buf).unwrap()
+            std::str::from_utf8(&self.bufs[i]).unwrap()
         );
     }
 
-    pub fn read_the_buf(&self) -> String {
-        let valid_content: Vec<u8> = self.buf.split(|&x| x == 0).next().unwrap_or(&[]).to_vec();
+    pub fn read_the_buf(&self, i: usize) -> String {
+        let valid_content: Vec<u8> = self.bufs[i]
+            .split(|&x| x == 0)
+            .next()
+            .unwrap_or(&[])
+            .to_vec();
         serde_json::from_slice::<String>(&valid_content).unwrap()
     }
 
     pub fn process_kv_opt(&mut self) {
-        let mut buf_0 = self.buf.clone();
+        let mut bufs_clone = self.bufs.clone();
         loop {
-            if buf_0 == self.buf || self.buf.is_empty() {
-                continue;
+            for i in 0..bufs_clone.len() {
+                if bufs_clone[i] == self.bufs[i] || self.bufs[i].is_empty() {
+                    continue;
+                }
+                self.check_the_buf(i);
+                let valid_content: Vec<u8> = self.bufs[i]
+                    .split(|&x| x == 0)
+                    .next()
+                    .unwrap_or(&[])
+                    .to_vec();
+                let kv_opt = serde_json::from_slice::<KeyValueOpt>(&valid_content).unwrap();
+                match kv_opt {
+                    KeyValueOpt::Set { key, value } => {
+                        self.kv_store.as_mut().unwrap().insert(key, value);
+                        tracing::info!("kv store: {:#?}", self.kv_store);
+                    }
+                    KeyValueOpt::Get { key } => {
+                        let value = self.kv_store.as_ref().unwrap().get(&key);
+                        let mut send_str =
+                            serde_json::to_vec(&value.unwrap_or(&"key not found".to_string()))
+                                .unwrap();
+                        self.set_bytes_to_buf(&mut send_str, i);
+                        self.post_send(ibv_wr_opcode::IBV_WR_SEND, i).unwrap();
+                        self.poll_completion().unwrap();
+                    }
+                    KeyValueOpt::Delete { key } => {
+                        self.kv_store.as_mut().unwrap().remove(&key);
+                        tracing::info!("kv store: {:#?}", self.kv_store);
+                    }
+                }
+                bufs_clone[i] = self.bufs[i].clone();
             }
-            self.check_the_buf();
-            let valid_content: Vec<u8> = self.buf.split(|&x| x == 0).next().unwrap_or(&[]).to_vec();
-            let kv_opt = serde_json::from_slice::<KeyValueOpt>(&valid_content).unwrap();
-            match kv_opt {
-                KeyValueOpt::Set { key, value } => {
-                    self.kv_store.as_mut().unwrap().insert(key, value);
-                    tracing::info!("kv store: {:#?}", self.kv_store);
-                }
-                KeyValueOpt::Get { key } => {
-                    let value = self.kv_store.as_ref().unwrap().get(&key);
-                    let mut send_str = serde_json::to_vec(&value.unwrap_or(&"key not found".to_string())).unwrap();
-                    self.set_bytes_to_buf(&mut send_str);
-                    self.post_send(ibv_wr_opcode::IBV_WR_SEND).unwrap();
-                    self.poll_completion().unwrap();
-                }
-                KeyValueOpt::Delete { key } => {
-                    self.kv_store.as_mut().unwrap().remove(&key);
-                    tracing::info!("kv store: {:#?}", self.kv_store);
-                }
-            }
-            buf_0 = self.buf.clone();
         }
     }
 }
 
 impl Drop for RdmaContext {
     fn drop(&mut self) {
-        let mut err = unsafe { ibv_destroy_qp(self.qp) };
+        for i in 0..self.qps.len() {
+            let err = unsafe { ibv_destroy_qp(self.qps[i]) };
+            assert_eq!(err, 0);
+        }
+        for i in 0..self.mrs.len() {
+            let err = unsafe { ibv_dereg_mr(self.mrs[i]) };
+            assert_eq!(err, 0);
+        }
+        let err = unsafe { ibv_destroy_cq(self.cq) };
         assert_eq!(err, 0);
-        err = unsafe { ibv_dereg_mr(self.mr) };
+        let err = unsafe { ibv_dealloc_pd(self.pd) };
         assert_eq!(err, 0);
-        err = unsafe { ibv_destroy_cq(self.cq) };
-        assert_eq!(err, 0);
-        err = unsafe { ibv_dealloc_pd(self.pd) };
-        assert_eq!(err, 0);
-        err = unsafe { ibv_close_device(self.ib_ctx) };
+        let err = unsafe { ibv_close_device(self.ib_ctx) };
         assert_eq!(err, 0);
     }
 }
