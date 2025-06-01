@@ -2,6 +2,7 @@ use crate::cli::{KeyValueOpt, RdmaOpt};
 use crate::gid::Gid;
 use rdma_sys::*;
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 use std::{
     collections::HashMap,
     ffi::CStr,
@@ -425,6 +426,7 @@ impl RdmaContext {
                 if bufs_clone[i] == self.bufs[i] || self.bufs[i].is_empty() {
                     continue;
                 }
+                println!("time: {:?}", Instant::now());
                 self.check_the_buf(i);
                 let valid_content: Vec<u8> = self.bufs[i]
                     .split(|&x| x == 0)

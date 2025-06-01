@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useCallback } from "react";
 import Login from "./components/Login";
 
 function App() {
@@ -11,23 +11,23 @@ function App() {
   const [history, setHistory] = useState([]);
 
   // 使用 serverIP 作为存储前缀
-  const getStorageKey = () => `kv_store_${serverIP}`;
+  const getStorageKey = useCallback(() => `kv_store_${serverIP}`, [serverIP]);
 
   // 从 localStorage 加载数据
-  const loadFromStorage = () => {
+  const loadFromStorage = useCallback(() => {
     const storedData = window.localStorage.getItem(getStorageKey());
     if (storedData) {
       setLocalStorage(JSON.parse(storedData));
     }
-  };
+  }, [getStorageKey]);
 
   // 保存数据到 localStorage
-  const saveToStorage = (data) => {
+  const saveToStorage = useCallback((data) => {
     window.localStorage.setItem(getStorageKey(), JSON.stringify(data));
-  };
+  }, [getStorageKey]);
 
   // 添加操作历史
-  const addToHistory = (operation, key, value, result) => {
+  const addToHistory = useCallback((operation, key, value, result) => {
     const timestamp = new Date().toLocaleTimeString();
     setHistory(prev => [{
       timestamp,
@@ -36,19 +36,23 @@ function App() {
       value,
       result
     }, ...prev].slice(0, 10)); // 只保留最近10条记录
-  };
+  }, []);
 
   // 监听其他标签页的存储变化
   useEffect(() => {
     const handleStorageChange = (e) => {
       if (e.key === getStorageKey()) {
-        setLocalStorage(JSON.parse(e.newValue || '{}'));
+        const newData = JSON.parse(e.newValue || '{}');
+        setLocalStorage(newData);
       }
     };
 
     window.addEventListener('storage', handleStorageChange);
+    // 初始加载数据
+    loadFromStorage();
+    
     return () => window.removeEventListener('storage', handleStorageChange);
-  }, [serverIP]);
+  }, [getStorageKey, loadFromStorage]);
 
   const handleLogin = (ip) => {
     setServerIP(ip);
@@ -140,224 +144,276 @@ function App() {
 
   return (
     <div style={{
-      maxWidth: 600,
-      margin: "60px auto",
-      padding: "32px",
-      fontFamily: "system-ui, -apple-system, sans-serif",
-      backgroundColor: "#ffffff",
-      borderRadius: "12px",
-      boxShadow: "0 4px 6px rgba(0, 0, 0, 0.1)",
+      height: '100vh',
+      display: 'flex',
+      alignItems: 'center',
+      justifyContent: 'center',
+      background: 'linear-gradient(135deg, #f6f9fc 0%, #eef2f7 100%)',
+      overflow: 'hidden',
     }}>
       <div style={{
-        display: "flex",
-        justifyContent: "space-between",
-        alignItems: "center",
-        marginBottom: "24px",
+        maxWidth: 600,
+        width: '100%',
+        margin: "20px",
+        padding: "40px",
+        fontFamily: "system-ui, -apple-system, sans-serif",
+        background: 'rgba(255, 255, 255, 0.95)',
+        borderRadius: "20px",
+        boxShadow: "0 10px 30px rgba(0, 0, 0, 0.08), 0 1px 3px rgba(0, 0, 0, 0.05)",
+        backdropFilter: "blur(10px)",
+        border: "1px solid rgba(255, 255, 255, 0.2)",
+        transition: "transform 0.3s ease, box-shadow 0.3s ease",
       }}>
-        <h2 style={{
-          color: "#2d3748",
-          fontSize: "28px",
-          margin: 0,
-        }}>KV Store Web</h2>
         <div style={{
           display: "flex",
+          justifyContent: "space-between",
           alignItems: "center",
-          gap: "16px",
+          marginBottom: "24px",
         }}>
+          <h2 style={{
+            color: "#1a365d",
+            fontSize: "32px",
+            margin: 0,
+            fontWeight: "600",
+            letterSpacing: "-0.5px",
+          }}>KV Store Web</h2>
           <div style={{
-            color: "#4a5568",
-            fontSize: "14px",
+            display: "flex",
+            alignItems: "center",
+            gap: "16px",
           }}>
-            Connected to: {serverIP}
-          </div>
-          <button
-            onClick={handleDisconnect}
-            style={{
-              backgroundColor: "#e53e3e",
-              color: "white",
-              padding: "8px 16px",
-              borderRadius: "6px",
-              border: "none",
+            <div style={{
+              color: "#2d3748",
               fontSize: "14px",
-              cursor: "pointer",
-              transition: "background-color 0.2s",
-            }}
-          >
-            Disconnect
-          </button>
-        </div>
-      </div>
-      
-      <div style={{ marginBottom: "16px" }}>
-        <input
-          placeholder="Key"
-          value={key}
-          onChange={e => setKey(e.target.value)}
-          style={{
-            width: "100%",
-            padding: "12px",
-            borderRadius: "8px",
-            border: "1px solid #e2e8f0",
-            fontSize: "16px",
-            outline: "none",
-            transition: "border-color 0.2s",
-          }}
-        />
-      </div>
-
-      <div style={{ marginBottom: "24px" }}>
-        <input
-          placeholder="Value (for set operation)"
-          value={value}
-          onChange={e => setValue(e.target.value)}
-          style={{
-            width: "100%",
-            padding: "12px",
-            borderRadius: "8px",
-            border: "1px solid #e2e8f0",
-            fontSize: "16px",
-            outline: "none",
-            transition: "border-color 0.2s",
-          }}
-        />
-      </div>
-
-      <div style={{ 
-        display: "flex",
-        gap: "12px",
-        justifyContent: "center",
-      }}>
-        <button
-          onClick={handleSet}
-          style={{
-            backgroundColor: "#4299e1",
-            color: "white",
-            padding: "12px 24px",
-            borderRadius: "8px",
-            border: "none",
-            fontSize: "16px",
-            cursor: "pointer",
-            transition: "background-color 0.2s",
-            flex: 1,
-          }}
-        >
-          Set Value
-        </button>
-        <button
-          onClick={handleGet}
-          style={{
-            backgroundColor: "#48bb78",
-            color: "white",
-            padding: "12px 24px",
-            borderRadius: "8px",
-            border: "none",
-            fontSize: "16px",
-            cursor: "pointer",
-            transition: "background-color 0.2s",
-            flex: 1,
-          }}
-        >
-          Get Value
-        </button>
-        <button
-          onClick={handleDelete}
-          style={{
-            backgroundColor: "#ed8936",
-            color: "white",
-            padding: "12px 24px",
-            borderRadius: "8px",
-            border: "none",
-            fontSize: "16px",
-            cursor: "pointer",
-            transition: "background-color 0.2s",
-            flex: 1,
-          }}
-        >
-          Delete Value
-        </button>
-      </div>
-
-      <div style={{
-        marginTop: "32px",
-        padding: "16px",
-        backgroundColor: "#f7fafc",
-        borderRadius: "8px",
-        border: "1px solid #e2e8f0"
-      }}>
-        <b style={{ color: "#2d3748" }}>Result:</b>
-        <pre style={{
-          marginTop: "8px",
-          padding: "12px",
-          backgroundColor: "#ffffff",
-          borderRadius: "6px",
-          border: "1px solid #e2e8f0",
-          overflow: "auto",
-          fontSize: "14px",
-          color: "#4a5568"
-        }}>{result}</pre>
-      </div>
-
-      <div style={{
-        marginTop: "32px",
-        padding: "16px",
-        backgroundColor: "#f7fafc",
-        borderRadius: "8px",
-        border: "1px solid #e2e8f0"
-      }}>
-        <b style={{ color: "#2d3748" }}>Operation History:</b>
-        <div style={{
-          marginTop: "8px",
-          maxHeight: "300px",
-          overflowY: "auto",
-        }}>
-          {history.map((item, index) => (
-            <div
-              key={index}
+              fontWeight: "500",
+            }}>
+              Connected to: {serverIP}
+            </div>
+            <button
+              onClick={handleDisconnect}
               style={{
-                padding: "12px",
-                backgroundColor: "#ffffff",
-                borderRadius: "6px",
-                border: "1px solid #e2e8f0",
-                marginBottom: "8px",
+                background: "linear-gradient(135deg, #e53e3e 0%, #c53030 100%)",
+                color: "white",
+                padding: "10px 20px",
+                borderRadius: "12px",
+                border: "none",
                 fontSize: "14px",
+                fontWeight: "600",
+                cursor: "pointer",
+                transition: "all 0.2s ease",
+                boxShadow: "0 4px 6px rgba(229, 62, 62, 0.2)",
+                ':hover': {
+                  transform: "translateY(-1px)",
+                  boxShadow: "0 6px 8px rgba(229, 62, 62, 0.3)",
+                },
               }}
             >
-              <div style={{ color: "#4a5568", marginBottom: "4px" }}>
-                <span style={{ color: "#2d3748", fontWeight: "bold" }}>{item.timestamp}</span>
-                {" - "}
-                <span style={{
-                  color: item.operation === "SET" ? "#4299e1" :
-                         item.operation === "GET" ? "#48bb78" : "#ed8936",
-                  fontWeight: "bold"
+              Disconnect
+            </button>
+          </div>
+        </div>
+        
+        <div style={{ marginBottom: "16px" }}>
+          <input
+            placeholder="Key"
+            value={key}
+            onChange={e => setKey(e.target.value)}
+            style={{
+              width: "100%",
+              padding: "14px",
+              borderRadius: "12px",
+              border: "2px solid #e2e8f0",
+              fontSize: "16px",
+              outline: "none",
+              transition: "all 0.2s ease",
+              backgroundColor: "#f8fafc",
+              ':focus': {
+                borderColor: "#4299e1",
+                boxShadow: "0 0 0 3px rgba(66, 153, 225, 0.15)",
+              }
+            }}
+          />
+        </div>
+
+        <div style={{ marginBottom: "24px" }}>
+          <input
+            placeholder="Value (for set operation)"
+            value={value}
+            onChange={e => setValue(e.target.value)}
+            style={{
+              width: "100%",
+              padding: "14px",
+              borderRadius: "12px",
+              border: "2px solid #e2e8f0",
+              fontSize: "16px",
+              outline: "none",
+              transition: "all 0.2s ease",
+              backgroundColor: "#f8fafc",
+              ':focus': {
+                borderColor: "#4299e1",
+                boxShadow: "0 0 0 3px rgba(66, 153, 225, 0.15)",
+              }
+            }}
+          />
+        </div>
+
+        <div style={{ 
+          display: "flex",
+          gap: "12px",
+          justifyContent: "center",
+        }}>
+          <button
+            onClick={handleSet}
+            style={{
+              background: "linear-gradient(135deg, #4299e1 0%, #3182ce 100%)",
+              color: "white",
+              padding: "14px 24px",
+              borderRadius: "12px",
+              border: "none",
+              fontSize: "16px",
+              fontWeight: "600",
+              cursor: "pointer",
+              transition: "all 0.2s ease",
+              boxShadow: "0 4px 6px rgba(66, 153, 225, 0.2)",
+              flex: 1,
+              ':hover': {
+                transform: "translateY(-1px)",
+                boxShadow: "0 6px 8px rgba(66, 153, 225, 0.3)",
+              },
+            }}
+          >
+            Set Value
+          </button>
+          <button
+            onClick={handleGet}
+            style={{
+              background: "linear-gradient(135deg, #48bb78 0%, #38a169 100%)",
+              color: "white",
+              padding: "14px 24px",
+              borderRadius: "12px",
+              border: "none",
+              fontSize: "16px",
+              fontWeight: "600",
+              cursor: "pointer",
+              transition: "all 0.2s ease",
+              boxShadow: "0 4px 6px rgba(72, 187, 120, 0.2)",
+              flex: 1,
+              ':hover': {
+                transform: "translateY(-1px)",
+                boxShadow: "0 6px 8px rgba(72, 187, 120, 0.3)",
+              },
+            }}
+          >
+            Get Value
+          </button>
+          <button
+            onClick={handleDelete}
+            style={{
+              background: "linear-gradient(135deg, #ed8936 0%, #dd6b20 100%)",
+              color: "white",
+              padding: "14px 24px",
+              borderRadius: "12px",
+              border: "none",
+              fontSize: "16px",
+              fontWeight: "600",
+              cursor: "pointer",
+              transition: "all 0.2s ease",
+              boxShadow: "0 4px 6px rgba(237, 137, 54, 0.2)",
+              flex: 1,
+              ':hover': {
+                transform: "translateY(-1px)",
+                boxShadow: "0 6px 8px rgba(237, 137, 54, 0.3)",
+              },
+            }}
+          >
+            Delete Value
+          </button>
+        </div>
+
+        <div style={{
+          marginTop: "32px",
+          padding: "20px",
+          backgroundColor: "rgba(247, 250, 252, 0.8)",
+          borderRadius: "12px",
+          border: "1px solid rgba(226, 232, 240, 0.8)",
+          backdropFilter: "blur(8px)",
+        }}>
+          <b style={{ color: "#1a365d", fontSize: "16px" }}>Result:</b>
+          <pre style={{
+            marginTop: "12px",
+            padding: "14px",
+            backgroundColor: "rgba(255, 255, 255, 0.9)",
+            borderRadius: "8px",
+            border: "1px solid rgba(226, 232, 240, 0.8)",
+            overflow: "auto",
+            fontSize: "14px",
+            color: "#2d3748"
+          }}>{result}</pre>
+        </div>
+
+        <div style={{
+          marginTop: "32px",
+          padding: "20px",
+          backgroundColor: "rgba(247, 250, 252, 0.8)",
+          borderRadius: "12px",
+          border: "1px solid rgba(226, 232, 240, 0.8)",
+          backdropFilter: "blur(8px)",
+        }}>
+          <b style={{ color: "#1a365d", fontSize: "16px" }}>Operation History:</b>
+          <div style={{
+            marginTop: "12px",
+            maxHeight: "300px",
+            overflowY: "auto",
+          }}>
+            {history.map((item, index) => (
+              <div
+                key={index}
+                style={{
+                  padding: "14px",
+                  backgroundColor: "rgba(255, 255, 255, 0.9)",
+                  borderRadius: "8px",
+                  border: "1px solid rgba(226, 232, 240, 0.8)",
+                  marginBottom: "8px",
+                  fontSize: "14px",
+                }}
+              >
+                <div style={{ color: "#2d3748", marginBottom: "4px" }}>
+                  <span style={{ color: "#1a365d", fontWeight: "600" }}>{item.timestamp}</span>
+                  {" - "}
+                  <span style={{
+                    color: item.operation === "SET" ? "#3182ce" :
+                           item.operation === "GET" ? "#38a169" : "#dd6b20",
+                    fontWeight: "600"
+                  }}>
+                    {item.operation}
+                  </span>
+                </div>
+                <div style={{ color: "#2d3748" }}>
+                  Key: {item.key}
+                  {item.value !== null && `, Value: ${item.value}`}
+                </div>
+                <div style={{
+                  color: item.result.startsWith("Error") ? "#e53e3e" : "#1a365d",
+                  marginTop: "4px",
+                  fontSize: "13px",
                 }}>
-                  {item.operation}
-                </span>
+                  {item.result}
+                </div>
               </div>
-              <div style={{ color: "#4a5568" }}>
-                Key: {item.key}
-                {item.value !== null && `, Value: ${item.value}`}
-              </div>
+            ))}
+            {history.length === 0 && (
               <div style={{
-                color: item.result.startsWith("Error") ? "#e53e3e" : "#2d3748",
-                marginTop: "4px",
-                fontSize: "13px",
+                padding: "14px",
+                backgroundColor: "rgba(255, 255, 255, 0.9)",
+                borderRadius: "8px",
+                border: "1px solid rgba(226, 232, 240, 0.8)",
+                color: "#718096",
+                textAlign: "center",
               }}>
-                {item.result}
+                No operations yet
               </div>
-            </div>
-          ))}
-          {history.length === 0 && (
-            <div style={{
-              padding: "12px",
-              backgroundColor: "#ffffff",
-              borderRadius: "6px",
-              border: "1px solid #e2e8f0",
-              color: "#a0aec0",
-              textAlign: "center",
-            }}>
-              No operations yet
-            </div>
-          )}
+            )}
+          </div>
         </div>
       </div>
     </div>

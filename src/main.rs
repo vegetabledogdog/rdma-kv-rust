@@ -6,8 +6,7 @@ use axum::{extract::State, routing::post, Json, Router};
 use cli::{KeyValueOpt, RdmaOpt};
 use context::RdmaContext;
 use rdma_sys::ibv_wr_opcode;
-use std::sync::{Arc, Mutex};
-use tokio::signal;
+use std::{sync::{Arc, Mutex}, time::Instant};
 
 #[tokio::main]
 async fn main() {
@@ -30,6 +29,7 @@ async fn main() {
 
                 let mut send_str = serde_json::to_vec(&kv_opt).unwrap();
                 rdma_context.set_bytes_to_buf(&mut send_str, 0);
+                println!("time: {:?}", Instant::now());
                 rdma_context
                     .post_send(ibv_wr_opcode::IBV_WR_RDMA_WRITE, 0)
                     .unwrap();
